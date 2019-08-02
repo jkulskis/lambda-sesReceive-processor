@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 from email import message_from_bytes
+from email.utils import getaddresses, parseaddr
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -82,11 +83,8 @@ def lambda_handler(event, context, debug=None):
     s3_client = boto3.client('s3')
     response = s3_client.get_object(Bucket=bucket, Key=key)
     msg = message_from_bytes(response['Body'].read())
-    recipient = [s.replace('<', '').replace('>', '')
-                 for s in msg['to'].split(' ') if '@' in s][0]
-    sender_unformatted = msg['from']
-    sender = [s.replace('<', '').replace('>', '')
-              for s in msg['from'].split(' ') if '@' in s][0]
+    recipient = getaddresses(msg.get_all('to', []))[0][1] # only want the first address, even if there are multiple
+    sender = parseaddr(msg['from'])
     subject = msg['subject']
     body = ''
     if msg.is_multipart():
@@ -103,7 +101,7 @@ def lambda_handler(event, context, debug=None):
         email_soup = BeautifulSoup(body, 'lxml')
     else:
         return 1
-    print('From:', sender_unformatted)
+    print('From: {} {}'.format(sender[0], sender[1]))
     print('Subject:', subject)
     print('To:', recipient)
     from_key = '{}/{}'.format(bucket, key)
