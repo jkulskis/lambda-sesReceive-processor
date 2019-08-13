@@ -9,8 +9,13 @@ import time
 
 
 def create_multipart_message(
-        sender: str, recipients: list, title: str, text: str=None, html: str=None, attachments: list=None)\
-        -> MIMEMultipart:
+        sender: str,
+        recipients: list,
+        title: str,
+        text: str = None,
+        html: str = None,
+        attachments: list = None
+) -> MIMEMultipart:
     """
     From https://stackoverflow.com/a/52105406/10231083
 
@@ -45,21 +50,35 @@ def create_multipart_message(
     for attachment in attachments or []:
         with open(attachment, 'rb') as f:
             part = MIMEApplication(f.read())
-            part.add_header('Content-Disposition', 'attachment', filename=os.path.basename(attachment))
+            part.add_header('Content-Disposition', 'attachment',
+                            filename=os.path.basename(attachment))
             msg.attach(part)
 
     return msg
 
+
 def send_mail(
-        sender: str, recipients: list, title: str, text: str = None, html: str = None, attachments: list = None) -> dict:
+    sender: str,
+    recipients: list,
+    title: str,
+    text: str = None,
+    html: str = None,
+    attachments: list = None
+) -> dict:
     """
     From https://stackoverflow.com/a/52105406/10231083
-    
+
     Send email to recipients. Sends one mail to all recipients.
     The sender needs to be a verified email in SES.
     """
     msg = create_multipart_message(
-        sender, recipients, title, text, html, attachments)
+        sender,
+        recipients,
+        title,
+        text,
+        html,
+        attachments
+    )
     ses_client = boto3.client('ses')  # Use your settings here
     return ses_client.send_raw_email(
         Source=sender,
@@ -83,7 +102,8 @@ def lambda_handler(event, context, debug=None):
     s3_client = boto3.client('s3')
     response = s3_client.get_object(Bucket=bucket, Key=key)
     msg = message_from_bytes(response['Body'].read())
-    recipient = getaddresses(msg.get_all('to', []))[0][1] # only want the first address, even if there are multiple
+    # only want the first address, even if there are multiple
+    recipient = getaddresses(msg.get_all('to', []))[0][1]
     sender = parseaddr(msg['from'])
     subject = msg['subject']
     body = ''
@@ -92,7 +112,6 @@ def lambda_handler(event, context, debug=None):
         for payload in msg.get_payload():
             if payload and payload.get_payload(decode=True).decode('utf8'):
                 body += payload.get_payload(decode=True).decode('utf8')
-                break # only add the html part if text + html, which should be first
     else:
         payload = msg.get_payload(decode=True)
         if payload:
@@ -101,25 +120,45 @@ def lambda_handler(event, context, debug=None):
         email_soup = BeautifulSoup(body, 'lxml')
     else:
         return 1
-    print('From: {} {}'.format(sender[0], sender[1]))
+    print('From: {} <{}>'.format(sender[0], sender[1]))
     print('Subject:', subject)
     print('To:', recipient)
     from_key = '{}/{}'.format(bucket, key)
     # check if this is a giveaway win notification
-    if sender == 'giveaway-notification@amazon.com':
-        from_email = '<SES VERIFIED FROM EMAIL>'
+    if sender[1] == 'giveaway-notification@amazon.com' or sender == 'giveaway-do-not-reply@amazon.com'[1]:
+        from_email = 'AWS Win Notification <SES VERIFIED FROM EMAIL>'
         forward_emails = ['<SES VERIFIED TO EMAIL>']
         email_client = boto3.client('ses')
-        send_response = send_mail(sender=from_email, recipients=forward_emails, title=subject, html=body, attachments=None)
-        to_key = 'wins/{email}/{time:.2f}'.format(email=recipient, time=time.time())
-        s3_client.copy_object(Bucket=bucket, CopySource=from_key, Key=to_key)
-        s3_client.delete_object(Bucket=bucket, Key=key)
+        # Add the recipient email as the text so it's easier to find out who the email was originally sent to if it is not immediately clear
+        send_response = send_mail(
+            sender=from_email,
+            recipients=forward_emails,
+            title=subject,
+            html=body,
+            text=recipient,
+        )
+        to_key = 'wins/{email}/{time:.2f}'.format(
+            email=recipient,
+            time=time.time()
+        )
+        s3_client.copy_object(
+            Bucket=bucket,
+            CopySource=from_key,
+            Key=to_key
+        )
+        s3_client.delete_object(
+            Bucket=bucket,
+            Key=key
+        )
         print('Moved email from {} to {}'.format(from_key, to_key))
         if 'MessageId' in send_response:
             if len(forward_emails) == 1:
                 forward_emails = forward_emails[0]
             print('Sent email from {from_email} to {to_email}. Message ID: {id}'.format(
-                from_email=from_email, to_email=forward_emails, id=send_response['MessageId']))
+                from_email=from_email,
+                to_email=forward_emails,
+                id=send_response['MessageId'])
+            )
             return 0
         else:
             print('Error sending email')
@@ -133,11 +172,36 @@ def lambda_handler(event, context, debug=None):
     except:
         print('Could not find OTP')
     if otp:
-        to_key = 'sorted/{email}/{time:.2f}-{OTP}'.format(email=recipient, time=time.time())
-        s3_client.copy_object(Bucket=bucket, CopySource=from_key, Key=to_key, OTP=otp)
-    else:
-        to_key = 'sorted/{email}/{time:.2f}'.format(email=recipient, time=time.time())
-        s3_client.copy_object(Bucket=bucket, CopySource=from_key, Key=to_key)
+        to_key = 'sorted/{email}/{time:.2f}-{OTP}'.format(
+            email=recipient,
+            time=time.time(),
+            OTP=otp
+        )
+        s3_client.copy_object(
+            Bucket=bucket,
+            CopySource=from_key,
+            Key=to_key
+        )
+    elif 'Per your request, we have updated your mobile phone information' not in body:
+        # Send the email if it was not spam, not an OTP, not a phone change notification, and not a giveaway win...could be something important
+        from_email = 'AWS Unknown Email <SES VERIFIED FROM EMAIL>'
+        forward_emails = ['<SES VERIFIED TO EMAIL>']
+        send_response = send_mail(
+            sender=from_email,
+            recipients=forward_emails,
+            title=subject,
+            html=body,
+            text=recipient,
+        )
+        to_key = 'sorted/{email}/{time:.2f}'.format(
+            email=recipient,
+            time=time.time()
+        )
+        s3_client.copy_object(
+            Bucket=bucket,
+            CopySource=from_key,
+            Key=to_key
+        )
     s3_client.delete_object(Bucket=bucket, Key=key)
     print('Moved email from {} to {}'.format(from_key, to_key))
     return 0
